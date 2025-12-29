@@ -1,0 +1,500 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Gene → Pathway correlation explorer (static)</title>
+  <link rel="stylesheet" href="css/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://cdn.plot.ly/plotly-2.20.0.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <div class="logo" title="GTEx explorer">
+        <svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <defs>
+            <linearGradient id="g1" x1="0" x2="1" y1="0" y2="1">
+              <stop offset="0%" stop-color="#66a6ff" />
+              <stop offset="100%" stop-color="#0f63ff" />
+            </linearGradient>
+          </defs>
+          <rect x="2" y="2" width="60" height="60" rx="12" fill="url(#g1)"/>
+          <g fill="#fff" transform="translate(8,10)">
+            <path d="M8 8c0-2 4-6 8-6s8 4 8 6-4 6-8 6-8-4-8-6z" opacity="0.9"/>
+            <text x="6" y="42" font-family="Inter, Arial" font-size="18" font-weight="700">GTEx</text>
+          </g>
+        </svg>
+      </div>
+      <div>
+        <h1>Gene → Pathway correlation explorer</h1>
+        <div class="subtitle">Browse gene–pathway correlations — local/static</div>
+      </div>
+    </div>
+  </header>
+  <main>
+    <div class="left">
+      <div class="panel">
+        <label>Load CSV (optional):</label>
+        <input id="fileInput" type="file" accept=".csv,.tsv,text/csv,text/tab-separated-values" />
+        <div id="dropZone" style="border:2px dashed #e2e8f0;padding:12px;margin-top:10px;text-align:center;cursor:pointer;border-radius:8px;background:linear-gradient(180deg,#fff,#fbfdff);">Drop CSV/TSV here or click to open file picker</div>
+        <div class="note">Tip: You can load CSV or TSV. If opened via <code>file://</code>, use the file input or drag-and-drop. "Load default" requires HTTP(S).</div>
+        <button id="loadDefault">Load default file</button>
+      </div>
+
+      <div class="panel">
+        <label for="geneSelect">Choose gene</label>
+        <div class="row col-maps">
+          <select id="colGene"></select>
+          <select id="colPathway"></select>
+        </div>
+        <div class="row col-maps" style="margin-top:8px;">
+          <select id="colCor"></select>
+          <select id="colP"></select>
+        </div>
+        <select id="geneSelect" disabled></select>
+        <div id="status" class="status">No data loaded</div>
+
+        <div class="row">
+          <div><label>Top + (pos)</label><input id="topPos" type="number" value="10" min="0" /></div>
+          <div><label>Top - (neg)</label><input id="topNeg" type="number" value="10" min="0" /></div>
+        </div>
+
+        <div class="row">
+          <label>Plot type</label>
+          <select id="plotType"><option>Bubble</option><option>Lollipop</option></select>
+        </div>
+
+        <div class="row">
+          <label><input id="showLabels" type="checkbox"/> Show value labels</label>
+        </div>
+
+        <div class="row">
+          <label>Lollipop palette</label>
+          <select id="lollipopPalette"><option value="plasma">Plasma</option><option value="viridis">Viridis</option><option value="cividis">Cividis</option><option value="magma">Magma</option></select>
+        </div>
+        <div class="row"><label><input id="lollipopReverse" type="checkbox"/> Reverse lollipop palette</label></div>
+
+        <div class="row">
+          <label>Width (px)</label><input id="plotWidth" type="number" value="1200" />
+          <label>Height (px)</label><input id="plotHeight" type="number" value="700" />
+        </div>
+
+              <div class="row">
+                <button id="updateBtn" disabled>Update plot</button>
+                <select id="exportFormat"><option>PNG</option><option>SVG</option><option>PDF</option></select>
+                <button id="downloadBtn" disabled>Download</button>
+              </div>
+      </div>
+
+      <div class="panel">
+        <strong>Preview (first 6 rows)</strong>
+        <pre id="preview" class="preview">No data loaded</pre>
+      </div>
+      <div class="panel gtex-log-panel">
+        <div class="log-header">
+          <strong>Activity Log</strong>
+          <div class="log-controls">
+            <select id="logLevelFilter"><option value="all">All</option><option value="info">Info</option><option value="warn">Warn</option><option value="error">Error</option></select>
+            <input id="logSearch" placeholder="Search log..." />
+          </div>
+        </div>
+        <div id="appLog" class="gtex-log"><div class="log-empty">No events yet</div></div>
+        <div style="margin-top:8px"><button id="clearLog" class="secondary">Clear log</button></div>
+      </div>
+    </div>
+
+    <div class="right">
+      <div id="plot" class="plot"></div>
+      <div id="tableWrap" class="panel"></div>
+    </div>
+  </main>
+
+  <script>
+// Inlined from js/app.js to avoid file:// CORS/script-loading issues
+// Static webapp script: loads CSV from data/adipose_gene_pathway_cor.csv (or via file input)
+// NOTE: project contains "adipose_gene_pathway_cor_head1000.csv" — set default to that file.
+const DATA_PATH = 'data/adipose_gene_pathway_cor_head1000.csv';
+let RAW = null; // array of objects
+let LAST_RAW_TEXT = null; // store raw text for diagnostics
+
+function showPreview(rows){
+  const pre = document.getElementById('preview');
+  if (!rows || !rows.length) { pre.textContent = 'No data loaded'; return; }
+  const keys = Object.keys(rows[0]);
+  const header = keys.join('\t');
+  const lines = rows.slice(0,6).map(r => keys.map(k=>r[k]).join('\t'));
+  pre.textContent = header + '\n' + lines.join('\n');
+}
+
+function parseCSVText(text, preferredSep){
+  try {
+    LAST_RAW_TEXT = String(text || '');
+    const hasBOM = /^\uFEFF/.test(LAST_RAW_TEXT);
+    const txt = LAST_RAW_TEXT.replace(/^\uFEFF/, '');
+    function detectSep(s){
+      const lines = s.split(/\r?\n/).filter(l=>l.trim()!=='');
+      if (!lines.length) return ',';
+      const first = lines[0];
+      const candidates = ['\t', ',', ';', '|'];
+      let best = ','; let bestCount = -1;
+      for (const c of candidates){ const cnt = (first.split(c).length - 1); if (cnt>bestCount){ bestCount = cnt; best = c; } }
+      return best;
+    }
+    const sep = detectSep(txt);
+    window.PARSE_DIAG = { detectedSep: sep, hasBOM: !!hasBOM };
+    if (typeof Papa !== 'undefined' && Papa.parse) {
+      // try with preferred separator if provided (e.g., .tsv), else autodetect
+      let res = null;
+      if (preferredSep) {
+        res = Papa.parse(txt, {header:true, skipEmptyLines:true, delimiter: preferredSep});
+      } else {
+        res = Papa.parse(txt, {header:true, skipEmptyLines:true});
+      }
+      if (!res || !res.data || res.data.length===0){
+        res = Papa.parse(txt, {header:true, skipEmptyLines:true, delimiter: sep});
+      }
+      const data = (res && res.data) ? res.data : [];
+      if (data.length===0){ return []; }
+      return data;
+    }
+    const lines = txt.split(/\r?\n/).filter(l=>l.trim()!=='');
+    if (lines.length === 0) return [];
+    const header = lines[0].split(preferredSep || sep).map(h=>h.trim());
+    const data = lines.slice(1).map(l=>{
+      const cols = l.split(preferredSep || sep);
+      const obj = {};
+      for (let i=0;i<header.length;i++){ obj[header[i]] = cols[i]!==undefined ? cols[i].replace(/^"|"$/g,'') : ''; }
+      return obj;
+    });
+    return data;
+  } catch (err) {
+    console.error('parseCSVText error', err);
+    const st = document.getElementById('status'); if (st) st.textContent = 'CSV parse error: '+(err.message||err);
+    return [];
+  }
+}
+
+function loadDefault(){
+  const st = document.getElementById('status'); if (st) st.textContent = 'Loading default CSV...';
+  if (location && location.protocol === 'file:'){
+    if (st) st.textContent = 'Running from file:// — use the file input or drag-and-drop to load CSV.';
+    alert('This page is opened via file://. Use the "Load CSV" file input or drag-and-drop to load your CSV. Loading default via fetch requires serving the site over HTTP(S).');
+    return;
+  }
+
+  fetch(DATA_PATH).then(r=>r.text()).then(txt=>{
+    RAW = parseCSVText(txt);
+    if (!RAW || RAW.length===0){ if (st) st.textContent = 'Default CSV loaded but empty or failed to parse.'; return; }
+    initUIFromData();
+  }).catch(e=>{
+    console.error(e);
+    alert('Failed to load default CSV at '+DATA_PATH+". Put your CSV there or use file input.");
+    if (st) st.textContent = 'Failed to load default CSV.';
+  });
+}
+
+function handleFileInput(file){
+  const st = document.getElementById('status'); if (st) st.textContent = 'Reading file...';
+  const reader = new FileReader();
+  reader.onload = function(e){
+    try{
+      const preferredSep = file && file.name && String(file.name).toLowerCase().endsWith('.tsv') ? '\t' : null;
+      RAW = parseCSVText(e.target.result, preferredSep);
+      if (!RAW || RAW.length===0){
+        const sampleRaw = LAST_RAW_TEXT || '';
+        const charCodes = [];
+        for (let i=0;i<Math.min(8, sampleRaw.length); i++){ charCodes.push(sampleRaw.charCodeAt(i)); }
+        const looksLikeUtf16 = charCodes.some(c=>c===0);
+        if (looksLikeUtf16){
+          const r2 = new FileReader();
+          if (st) st.textContent = 'Retrying read as UTF-16...';
+          r2.onload = function(e2){
+            const preferredSep2 = file && file.name && String(file.name).toLowerCase().endsWith('.tsv') ? '\t' : null;
+            RAW = parseCSVText(e2.target.result || '', preferredSep2);
+            if (!RAW || RAW.length===0){
+              showParseFailureDiagnostics(st);
+              return;
+            }
+            initUIFromData();
+          };
+          r2.onerror = function(){ showParseFailureDiagnostics(st); };
+          try{ r2.readAsText(file, 'utf-16le'); return; }catch(err){ }
+        }
+        showParseFailureDiagnostics(st);
+        return;
+      }
+      initUIFromData();
+    } catch(err){ console.error(err); if (st) st.textContent = 'Error parsing file: '+(err.message||err); }
+  };
+  reader.onerror = function(err){ console.error('FileReader error', err); if (st) st.textContent = 'Failed to read file.'; };
+  reader.readAsText(file);
+}
+
+function showParseFailureDiagnostics(st){
+  if (st) {
+    const diag = window.PARSE_DIAG || {};
+    st.textContent = 'File loaded but empty or failed to parse. Detected sep: '+(diag.detectedSep||'?')+', BOM: '+(diag.hasBOM? 'yes':'no')+". See preview.";
+  }
+  const sample = (LAST_RAW_TEXT||'').slice(0,2000);
+  function hexFirst(s,n){ const b=[]; for (let i=0;i<Math.min(n, s.length); i++){ b.push(s.charCodeAt(i).toString(16).padStart(2,'0')); } return b.join(' '); }
+  const pre = document.getElementById('preview'); if (pre) pre.textContent = '--- First line (raw) ---\n'+(sample.split(/\r?\n/)[0]||'')+'\n\n--- First 2k chars ---\n'+sample+'\n\n--- Hex of first 64 chars ---\n'+hexFirst(LAST_RAW_TEXT||'',64);
+}
+
+function log(msg, level='info'){
+  try{
+    const el = document.getElementById('appLog');
+    if (!el) return;
+    // remove empty placeholder
+    const empty = el.querySelector('.log-empty'); if (empty) empty.remove();
+    const t = new Date().toLocaleTimeString();
+    const entry = document.createElement('div');
+    entry.className = 'log-entry ' + (level==='warn' ? 'warn' : (level==='error' ? 'error' : 'info'));
+    entry.dataset.level = level;
+    const time = document.createElement('div'); time.className = 'log-time'; time.textContent = t;
+    const badge = document.createElement('div'); badge.className = 'log-badge'; badge.textContent = (level||'info').toUpperCase();
+    const msgDiv = document.createElement('div'); msgDiv.className = 'log-msg'; msgDiv.textContent = msg;
+    entry.appendChild(time); entry.appendChild(badge); entry.appendChild(msgDiv);
+    el.appendChild(entry);
+    // cap log length
+    const max = 500; const items = el.querySelectorAll('.log-entry');
+    if (items.length > max){ items[0].remove(); }
+    el.scrollTop = el.scrollHeight;
+    applyLogFilters();
+  }catch(e){}
+}
+
+function applyLogFilters(){
+  const el = document.getElementById('appLog'); if (!el) return;
+  const lvl = document.getElementById('logLevelFilter') ? document.getElementById('logLevelFilter').value : 'all';
+  const q = document.getElementById('logSearch') ? document.getElementById('logSearch').value.trim().toLowerCase() : '';
+  const entries = el.querySelectorAll('.log-entry');
+  entries.forEach(en=>{
+    const lev = en.dataset.level || 'info';
+    const txt = (en.querySelector('.log-msg') ? en.querySelector('.log-msg').textContent : en.textContent || '').toLowerCase();
+    const okLevel = (lvl === 'all') || (lev === lvl);
+    const okQuery = q === '' || txt.indexOf(q) !== -1;
+    en.style.display = (okLevel && okQuery) ? 'flex' : 'none';
+  });
+}
+
+function initUIFromData(){
+  const st = document.getElementById('status');
+  if (!RAW || RAW.length===0){ showPreview(RAW); if (st) st.textContent = 'No data loaded'; return; }
+  showPreview(RAW);
+  const keys = Object.keys(RAW[0] || {});
+  const colGene = document.getElementById('colGene');
+  const colPathway = document.getElementById('colPathway');
+  if (!document.getElementById('colCor')){
+    const el = document.createElement('select'); el.id = 'colCor'; el.style.marginTop = '8px'; document.querySelector('.panel').appendChild(el);
+  }
+  if (!document.getElementById('colP')){
+    const el2 = document.createElement('select'); el2.id = 'colP'; el2.style.marginTop = '8px'; document.querySelector('.panel').appendChild(el2);
+  }
+  const colCor = document.getElementById('colCor');
+  const colP = document.getElementById('colP');
+  [colGene, colPathway, colCor, colP].forEach(s=>{ s.innerHTML=''; keys.forEach(k=>{ const o=document.createElement('option'); o.value=k; o.textContent=k; s.appendChild(o); }); });
+
+  const defGene = detectColumn(['gene','symbol','hgnc_symbol','gene_name']);
+  const defPath = detectColumn(['pathway','term','gsva','gsva_name','path']);
+  const defCor  = detectColumn(['cor','corr','correlation','rho']);
+  const defP    = detectColumn(['pval','p.value','p_value','pvalue']);
+  colGene.value = defGene || keys[0]; colPathway.value = defPath || keys[1] || keys[0]; colCor.value = defCor || keys[2] || keys[0]; colP.value = defP || '';
+
+  const geneSelect = document.getElementById('geneSelect');
+  function populateGenes(){
+    const gcol = colGene.value;
+    const vals = RAW.map(r=>{
+      const v = r[gcol];
+      if (v===undefined || v===null) return '';
+      return String(v).replace(/^\"|\"$/g,'').trim();
+    }).filter(v=>v!=='');
+    const uniq = Array.from(new Set(vals)).sort((a,b)=>a.localeCompare(b, undefined, {sensitivity:'base'}));
+    geneSelect.innerHTML = '';
+    uniq.forEach(g=>{ const opt=document.createElement('option'); opt.value=g; opt.textContent=g; geneSelect.appendChild(opt); });
+    geneSelect.disabled = uniq.length===0;
+    document.getElementById('updateBtn').disabled = uniq.length===0;
+    document.getElementById('downloadBtn').disabled = uniq.length===0;
+    if (st) st.textContent = `Loaded ${RAW.length} rows — ${keys.length} columns detected.`;
+  }
+  colGene.addEventListener('change', populateGenes);
+  colPathway.addEventListener('change', ()=>{ document.getElementById('status').textContent = `Pathway column set to ${colPathway.value}`; });
+  populateGenes();
+}
+
+function detectColumn(candidates){
+  if (!RAW || RAW.length===0) return null;
+  const keys = Object.keys(RAW[0]).map(k=>k.toLowerCase());
+  for (const c of candidates){
+    const i = keys.indexOf(c.toLowerCase()); if (i>=0) return Object.keys(RAW[0])[i];
+  }
+  return Object.keys(RAW[0])[0];
+}
+
+function updatePlot(){
+  if (!RAW) { alert('No data loaded'); return; }
+  const gene = document.getElementById('geneSelect').value;
+  const topPos = parseInt(document.getElementById('topPos').value)||0;
+  const topNeg = parseInt(document.getElementById('topNeg').value)||0;
+  const showLabels = document.getElementById('showLabels').checked;
+    const plotType = document.getElementById('plotType') ? document.getElementById('plotType').value : 'Bubble';
+  const lollipopPalette = document.getElementById('lollipopPalette').value;
+  const lollipopReverse = document.getElementById('lollipopReverse').checked;
+
+  const geneCol = document.getElementById('colGene')?.value || detectColumn(['gene','symbol','hgnc_symbol','gene_name']);
+  const pathCol = document.getElementById('colPathway')?.value || detectColumn(['pathway','term','gsva','gsva_name','path']);
+  const corCol  = document.getElementById('colCor')?.value || detectColumn(['cor','corr','correlation','rho']);
+  const pCol    = document.getElementById('colP')?.value || detectColumn(['pval','p.value','p_value','pvalue']);
+
+  let subset = RAW.filter(r=>{
+    const v = r[geneCol];
+    const sv = v===undefined || v===null ? '' : String(v).replace(/^\"|\"$/g,'').trim();
+    return sv === String(gene);
+  });
+  subset = subset.map(r=>{
+    const copy = {};
+    Object.keys(r).forEach(k=>{ copy[k]= r[k]===undefined || r[k]===null ? '' : String(r[k]).replace(/^\"|\"$/g,'').trim(); });
+    return copy;
+  });
+  subset.forEach(r=>{ r._cor = parseFloat(r[corCol]); });
+  const pos = subset.filter(r=>r._cor>0).sort((a,b)=>b._cor-a._cor).slice(0,topPos);
+  const neg = subset.filter(r=>r._cor<0).sort((a,b)=>a._cor-b._cor).slice(0,topNeg);
+  let final = neg.concat(pos);
+  // ensure final is sorted by correlation ascending (small -> large)
+  final = final.sort((a,b)=> (Number(a._cor) || 0) - (Number(b._cor) || 0));
+  if (final.length===0){ alert('No rows for this gene'); return; }
+
+  const pathways = final.map(r=>r[pathCol]);
+  const cors = final.map(r=>r._cor);
+  const sizesVals = final.map(r=>Math.abs(r._cor));
+  let colorVals = null;
+  if (pCol && final[0] && final[0][pCol]!==undefined && final[0][pCol]!==null && String(final[0][pCol]).trim()!==''){
+    colorVals = final.map(r=>{
+      const pv = parseFloat(r[pCol]);
+      return Number.isFinite(pv) ? -Math.log10(Math.max(pv, 1e-300)) : 0;
+    });
+  } else {
+    colorVals = cors.slice();
+  }
+
+  const width = parseInt(document.getElementById('plotWidth').value)||1200;
+  const height = parseInt(document.getElementById('plotHeight').value)||700;
+
+  if (plotType==='Bubble'){
+    const markerSizes = computeMarkerSizes(sizesVals, {minPx:6, maxPx:28, transform:null});
+    const palette = paletteToPlotly(lollipopPalette, lollipopReverse);
+    const colorbarTitle = (pCol && colorVals && colorVals.length)? '-log10(p)' : 'Correlation';
+    const trace = {
+      x: cors,
+      y: pathways,
+      mode: 'markers',
+      marker: { size: markerSizes, opacity:0.85, color: colorVals, colorscale: palette, showscale:true, colorbar:{title: colorbarTitle, titleside:'right'}, line:{color:'black',width:0.5}, sizemode:'diameter' },
+      type: 'scatter'
+    };
+    const maxLabel = pathways.reduce((m,p)=>Math.max(m, String(p).length), 0);
+    const leftMargin = Math.min(900, Math.max(220, Math.floor(maxLabel * 8)));
+    const layout = {
+      title: `Top ${final.length} pathways for ${gene}`,
+      xaxis:{title:'Correlation', zeroline:true, zerolinecolor:'#ccc', tickcolor:'#000', titlefont:{color:'#000'}, tickfont:{color:'#000'}},
+      yaxis:{type:'category', categoryorder:'array', categoryarray:pathways, tickfont:{color:'#000', size:11}, automargin:true},
+      width, height,
+      plot_bgcolor:'#fff', paper_bgcolor:'#fff',
+      margin:{l:leftMargin, r:50, t:80, b:80}
+    };
+    Plotly.newPlot('plot',[trace], layout, {responsive:true});
+    makeTable(final);
+  } else {
+    const xSeg = [], ySeg = [];
+    for (let i=0;i<final.length;i++){ xSeg.push(0, final[i]._cor, null); ySeg.push(final[i][pathCol], final[i][pathCol], null); }
+    const segTrace = { x: xSeg, y: ySeg, mode:'lines', line:{color:'#bdbdbd', width:2}, hoverinfo:'none', type:'scatter' };
+    const markerSizes2 = computeMarkerSizes(sizesVals, {minPx:8, maxPx:60, transform:null});
+    const markerTrace = { x: cors, y: pathways, mode:'markers', marker:{size: markerSizes2, opacity:0.9, color: colorVals, colorscale: paletteToPlotly(lollipopPalette, lollipopReverse), showscale:true, colorbar:{title:(pCol?'-log10(p)':'Correlation')}, line:{color:'black',width:0.5}, sizemode:'diameter'}, type:'scatter', text: cors.map(c=>c.toFixed(3)), hoverinfo:'text+y' };
+    const data = [segTrace, markerTrace];
+    const maxLabel2 = pathways.reduce((m,p)=>Math.max(m, String(p).length), 0);
+    const leftMargin2 = Math.min(900, Math.max(220, Math.floor(maxLabel2 * 8)));
+    const layout = { title:`Top ${final.length} pathways for ${gene}`, xaxis:{title:'Correlation', tickfont:{color:'#000'}}, yaxis:{type:'category', autorange:'reversed', tickfont:{color:'#000', size:11}, automargin:true}, width, height, margin:{l:leftMargin2, r:50, t:80, b:80}, plot_bgcolor:'#fff', paper_bgcolor:'#fff'};
+    Plotly.newPlot('plot', data, layout, {responsive:true});
+    if (showLabels){
+      const ann = final.map((d,i)=>({ x:d._cor, y:d[pathCol], xanchor: d._cor>=0 ? 'left':'right', text: d._cor.toFixed(2), showarrow:false, font:{color:'#000', size:11}}));
+      Plotly.relayout('plot', {'annotations': ann});
+    }
+    makeTable(final);
+  }
+}
+
+function paletteToPlotly(name, reverse){
+  const map = {plasma:'Plasma', viridis:'Viridis', cividis:'Cividis', magma:'Magma'};
+  let scale = map[name] || 'Plasma';
+  if (reverse) return scale + 'r';
+  return scale;
+}
+
+function computeMarkerSizes(vals, opts={minPx:6, maxPx:120, transform:null}){
+  const arr = vals.map(v=>{ const n = Number(v); return Number.isFinite(n)?n:0; });
+  let work = arr.slice();
+  if (opts.transform==='log'){
+    work = work.map(v=>{ const vv = Math.max(Math.abs(v), 1e-300); return -Math.log10(vv); });
+  }
+  const minv = Math.min(...work);
+  const maxv = Math.max(...work);
+  if (maxv === minv){
+    const mid = Math.round((opts.minPx + opts.maxPx)/2);
+    return work.map(()=> mid);
+  }
+  return work.map(v=>{
+    const norm = (v - minv) / (maxv - minv);
+    return Math.round(opts.minPx + norm * (opts.maxPx - opts.minPx));
+  });
+}
+
+function makeTable(rows){
+  const wrap = document.getElementById('tableWrap');
+  let html = '<table><thead><tr>' + Object.keys(rows[0]).map(k=>`<th>${k}</th>`).join('') + '</tr></thead><tbody>';
+  rows.forEach(r=>{ html += '<tr>' + Object.values(r).map(v=>`<td>${String(v)}</td>`).join('') + '</tr>'; });
+  html += '</tbody></table>';
+  wrap.innerHTML = html;
+}
+
+function downloadCurrent(){
+  const fmt = document.getElementById('exportFormat') ? document.getElementById('exportFormat').value.toLowerCase() : 'png';
+  const w = parseInt(document.getElementById('plotWidth').value)||1200;
+  const h = parseInt(document.getElementById('plotHeight').value)||700;
+  const gd = document.getElementById('plot');
+  const scale = fmt==='png'?2:1;
+  Plotly.toImage(gd, {format: fmt, width: w, height: h, scale: scale}).then(function(dataUrl){
+    const a = document.createElement('a'); a.href = dataUrl; a.download = (document.getElementById('geneSelect').value||'plot') + '_plot.'+fmt; document.body.appendChild(a); a.click(); a.remove();
+  });
+}
+
+document.addEventListener('DOMContentLoaded', ()=>{
+  document.getElementById('loadDefault').addEventListener('click', loadDefault);
+  document.getElementById('fileInput').addEventListener('change', (e)=>{ if (e.target.files.length) handleFileInput(e.target.files[0]); });
+  document.getElementById('updateBtn').addEventListener('click', updatePlot);
+  document.getElementById('downloadBtn').addEventListener('click', downloadCurrent);
+    const clearBtn = document.getElementById('clearLog'); if (clearBtn) clearBtn.addEventListener('click', ()=>{ const el=document.getElementById('appLog'); if (el) el.innerHTML='<div class="log-empty">No events yet</div>'; });
+    const lvl = document.getElementById('logLevelFilter'); if (lvl) lvl.addEventListener('change', applyLogFilters);
+    const s = document.getElementById('logSearch'); if (s) s.addEventListener('input', applyLogFilters);
+});
+
+try{
+  const dropZone = document.getElementById('dropZone');
+  if (dropZone){
+    dropZone.addEventListener('dragover', (e)=>{ e.preventDefault(); dropZone.style.background='#f7f7f7'; });
+    dropZone.addEventListener('dragleave', ()=>{ dropZone.style.background=''; });
+    dropZone.addEventListener('drop', (e)=>{ e.preventDefault(); dropZone.style.background=''; if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) handleFileInput(e.dataTransfer.files[0]); });
+    dropZone.addEventListener('click', ()=>{ document.getElementById('fileInput').click(); });
+  }
+}catch(e){ }
+
+try{
+  window.handleFileInput = handleFileInput;
+  window.initUIFromData = initUIFromData;
+  window.loadDefault = loadDefault;
+  window.updatePlot = updatePlot;
+  window.downloadCurrent = downloadCurrent;
+  window.computeMarkerSizes = computeMarkerSizes;
+}catch(e){ }
+  </script>
+</body>
+</html>
